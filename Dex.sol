@@ -16,6 +16,7 @@ contract Dex {
 
     struct Order {
         uint id;
+        address trader;
         bytes32 ticker;
         uint amount;
         Side side;
@@ -24,12 +25,28 @@ contract Dex {
         uint date;
     }
 
+    /**
+     * @notice Events start...
+     */
+
+    event NewTrade(
+        uint tradeId,
+        uint orderId,
+        uint price,
+        uint amount,
+        uint date,
+        bytes32 indexed ticker,
+        address indexed trader1,
+        address indexed trader2
+    );
+
     mapping(bytes32 => Token) public tokens;
     mapping(bytes32 => mapping(address => uint)) public traderBalances;
     mapping(bytes32 => mapping(uint => Order[])) public orderBooks;
     bytes32[] public tokenList;
     address public admin;
     uint public nextOrderId;
+    uint public nextTradeId;
     bytes32 public DAI = bytes32("Dai");
 
     constructor() {
@@ -73,8 +90,7 @@ contract Dex {
         Side _side,
         uint _amount,
         uint _price
-    ) external tokenExists(_ticker) {
-        require(_ticker != DAI, "ticker token must not be dai");
+    ) external tokenExists(_ticker) mustNotDai(_ticker) {
         if (_side == Side.SELL) {
             require(
                 traderBalances[_ticker][msg.sender] >= _amount,
@@ -89,6 +105,7 @@ contract Dex {
         Order[] memory orders = orderBooks[_ticker][_side];
         orders.push(
             nextOrderId,
+            msg.sender,
             _ticker,
             _amount,
             _side,
@@ -113,11 +130,88 @@ contract Dex {
         nextOrderId++;
     }
 
+    function createMarketOrder(
+        bytes32 _ticker,
+        Side _side,
+        uint _amount
+    ) external tokenExists(_ticker) mustNotDai(_ticker) {
+        if (_side == Side.SELL) {
+            require(
+                traderBalances[_ticker][msg.sender] >= _amount,
+                "not enough token to trade"
+            );
+        }
+        Order memory orders = orderBooks[_ticker][
+            uint(_side == Side.BUY ? Side.SELL : Side.BUY)
+        ];
+
+        uint i;
+        uint remaining = _amount;
+
+        while (i < orders.length && remaining > 0) {
+            uint available = orders[i].amount - orders[i].filled;
+            uint matched = (remaining > available) ? available : remaining;
+
+            remaining -= matched;
+            orders[i].filled += matched;
+
+            emit NewTrade(
+                nextTradeId,
+                orders[i].id,
+                orders[i].price,
+                _amount,
+                block.timestamp,
+                _ticker,
+                orders[i].trader,
+                msg.sender
+            );
+            if (_side == Side.SELL) {
+                require(
+                    traderBalances[_ticker][msg.sender] >= _amount,
+                    "not enough token to sell"
+                );
+                traderBalances[_ticker][msg.sender] -= matched;
+                traderBalances[DAI][msg.sender] += matched;
+                traderBalances[_ticker][orders[i].trader] += matched;
+                traderBalances[DAI][orders[i].trader] -= matched;
+            }
+            if (_side == Side.BUY) {
+                require(
+                    traderBalances[DAI][msg.sender] >=
+                        matched * orders[i].price,
+                    "not enough dai to buy"
+                );
+                traderBalances[_ticker][msg.sender] += matched;
+                traderBalances[DAI][msg.sender] -= matched;
+                traderBalances[_ticker][orders[i].trader] -= matched;
+                traderBalances[DAI][orders[i].trader] += matched;
+            }
+
+            nextTradeId++;
+            i++;
+
+            i = 0;
+
+            while (i < orders.length && orders[i].filled == orders[i].amount) {
+                for (uint j = i; j < orders.length - 1; j++) {
+                    orders[j] = orders[i + 1];
+                }
+                orders.pop();
+                i++;
+            }
+        }
+    }
+
     modifier tokenExists(bytes32 _ticker) {
         require(
             tokens[_ticker].tokenAddress != address(0),
             "token is not existed"
         );
+        _;
+    }
+
+    modifier mustNotDai(bytes32 _ticker) {
+        require(_ticker != DAI, "ticker token must not be dai");
         _;
     }
 
